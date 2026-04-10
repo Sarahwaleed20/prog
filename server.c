@@ -15,12 +15,14 @@
 void decrypt(unsigned char *ciphertext, int ciphertext_len, unsigned char *key, unsigned char *iv, unsigned char *plaintext) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len, plaintext_len;
+
     EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
     EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext, ciphertext_len);
     plaintext_len = len;
     EVP_DecryptFinal_ex(ctx, plaintext + len, &len);
     plaintext_len += len;
     plaintext[plaintext_len] = '\0';
+
     EVP_CIPHER_CTX_free(ctx);
 }
 
@@ -36,6 +38,7 @@ void *handle_client(void *socket_desc) {
 
     read(new_socket, &nonce, sizeof(nonce));
     read(new_socket, client_hmac, 32);
+
     HMAC(EVP_sha256(), PSK, strlen(PSK), (unsigned char*)&nonce, sizeof(nonce), server_hmac, &hmac_len);
 
     if (memcmp(client_hmac, server_hmac, 32) != 0) {
@@ -48,9 +51,6 @@ void *handle_client(void *socket_desc) {
     read(new_socket, username, 50);
     read(new_socket, password_hash, 128);
 
-    username[strcspn(username, "\r\n")] = 0;
-    password_hash[strcspn(password_hash, "\r\n")] = 0;
-
     FILE *fptr = fopen("users.txt", "r");
     if (!fptr) {
         perror("Could not open users.txt");
@@ -58,11 +58,14 @@ void *handle_client(void *socket_desc) {
         return NULL;
     }
 
-    char file_user[50], file_hash[128];
+    char file_user[50], file_hash[128], file_role[20];
+    char user_role[20] = {0};
     int auth_success = 0;
-    while (fscanf(fptr, "%s %s", file_user, file_hash) != EOF) {
+
+    while (fscanf(fptr, "%s %s %s", file_user, file_hash, file_role) != EOF) {
         if (strcmp(file_user, username) == 0 && strcmp(file_hash, password_hash) == 0) {
             auth_success = 1;
+            strcpy(user_role, file_role);
             break;
         }
     }
@@ -73,16 +76,41 @@ void *handle_client(void *socket_desc) {
         close(new_socket);
         return NULL;
     }
-    printf("User %s authenticated successfully\n", username);
+
+    printf("User %s authenticated with role: %s\n", username, user_role);
 
     RAND_bytes(iv, sizeof(iv));
     send(new_socket, iv, sizeof(iv), 0);
+
     memcpy(key, PSK, 32);
 
     int ciphertext_len = read(new_socket, buffer, BUFFER_SIZE);
     unsigned char plaintext[BUFFER_SIZE];
+
     decrypt(buffer, ciphertext_len, key, iv, plaintext);
-    printf("Decrypted message: %s\n", plaintext);
+
+    printf("Command received: %s\n", plaintext);
+
+    if (strcmp(user_role, "entry") == 0) {
+        if (strncmp((char*)plaintext, "ls", 2) == 0 ||
+            strncmp((char*)plaintext, "cat", 3) == 0) {
+            system((char*)plaintext);
+        } else {
+            printf("Access denied: Entry level restriction\n");
+        }
+    }
+
+    else if (strcmp(user_role, "medium") == 0) {
+        if (strstr((char*)plaintext, "rm") != NULL) {
+            printf("Access denied: Cannot delete files\n");
+        } else {
+            system((char*)plaintext);
+        }
+    }
+
+    else if (strcmp(user_role, "top") == 0) {
+        system((char*)plaintext);
+    }
 
     close(new_socket);
     return NULL;
@@ -94,23 +122,27 @@ int main() {
     int addrlen = sizeof(address);
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
+
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
     bind(server_fd, (struct sockaddr*)&address, sizeof(address));
     listen(server_fd, 5);
+
     printf("Server listening on port %d\n", PORT);
 
     while (1) {
         new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
+
         int *new_sock = malloc(sizeof(int));
         *new_sock = new_socket;
 
         pthread_t thread_id;
         pthread_create(&thread_id, NULL, handle_client, (void*)new_sock);
-        pthread_detach(thread_id); 
+        pthread_detach(thread_id);
     }
+
     close(server_fd);
     return 0;
 }
